@@ -1,28 +1,16 @@
-import os
-import json
 import asyncio
 import aiohttp
 from flask import Flask, request, jsonify
 from bs4 import BeautifulSoup
 from asgiref.wsgi import WsgiToAsgi  # Converts a WSGI app to an ASGI app
+from flask_caching import Cache
 
 app = Flask(__name__)
-CACHE_FILE = "cache.json"
 
-# Cache helper functions
-def load_cache():
-    if os.path.exists(CACHE_FILE):
-        with open(CACHE_FILE, "r") as f:
-            try:
-                return json.load(f)
-            except Exception:
-                return {}
-    else:
-        return {}
-
-def save_cache(cache_data):
-    with open(CACHE_FILE, "w") as f:
-        json.dump(cache_data, f)
+# Configure Flask-Caching to use an in-memory cache (SimpleCache)
+app.config['CACHE_TYPE'] = 'SimpleCache'
+app.config['CACHE_DEFAULT_TIMEOUT'] = 300  # Cache timeout in seconds (5 minutes)
+cache = Cache(app)
 
 # Functions to extract product details from a product page
 def get_title(soup):
@@ -120,18 +108,17 @@ async def scrape_ebay(search_term):
 @app.route('/scrape', methods=['GET'])
 async def scrape_endpoint():
     # Accept query parameter "term" (default: "shoes")
-    search_term = request.args.get('term')
+    search_term = request.args.get('term', 'shoes')
     
-    # Load cache and check if term already exists
-    cache = load_cache()
-    if search_term in cache:
+    # Try to retrieve cached data for this search term
+    cached_data = cache.get(search_term)
+    if cached_data is not None:
         print("Loading from cache")
-        return jsonify(cache[search_term])
+        return jsonify(cached_data)
     
     # Otherwise, scrape and update the cache
     products_info = await scrape_ebay(search_term)
-    cache[search_term] = products_info
-    save_cache(cache)
+    cache.set(search_term, products_info)
     return jsonify(products_info)
 
 # Convert the Flask WSGI app to an ASGI app
