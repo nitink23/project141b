@@ -120,7 +120,7 @@ async def scrape_ebay(search_term):
 @app.route('/scrape', methods=['GET'])
 async def scrape_endpoint():
     # Accept query parameter "term" (default: "shoes")
-    search_term = request.args.get('term', 'shoes')
+    search_term = request.args.get('term')
     
     # Load cache and check if term already exists
     cache = load_cache()
