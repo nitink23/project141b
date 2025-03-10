@@ -1,10 +1,28 @@
-from flask import Flask, request, jsonify
+import os
+import json
 import asyncio
 import aiohttp
+from flask import Flask, request, jsonify
 from bs4 import BeautifulSoup
-from asgiref.wsgi import WsgiToAsgi  # This converts a WSGI app to an ASGI app
+from asgiref.wsgi import WsgiToAsgi  # Converts a WSGI app to an ASGI app
 
 app = Flask(__name__)
+CACHE_FILE = "cache.json"
+
+# Cache helper functions
+def load_cache():
+    if os.path.exists(CACHE_FILE):
+        with open(CACHE_FILE, "r") as f:
+            try:
+                return json.load(f)
+            except Exception:
+                return {}
+    else:
+        return {}
+
+def save_cache(cache_data):
+    with open(CACHE_FILE, "w") as f:
+        json.dump(cache_data, f)
 
 # Functions to extract product details from a product page
 def get_title(soup):
@@ -65,6 +83,11 @@ async def fetch_product_data(session, url, req_headers):
     }
     return product_data
 
+# Helper to wrap tasks with index
+async def fetch_with_index(idx, url, req_headers, session):
+    data = await fetch_product_data(session, url, req_headers)
+    return idx, data
+
 async def scrape_ebay(search_term):
     req_headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
@@ -82,12 +105,12 @@ async def scrape_ebay(search_term):
         watcher_elements = search_soup.find_all("span", class_="s-item__dynamic s-item__watchCountTotal")
         watchers_list = [span.text.strip() for span in watcher_elements]
         
-        tasks = [fetch_product_data(session, url, req_headers) for url in product_urls]
+        tasks = [fetch_with_index(idx, url, req_headers, session) for idx, url in enumerate(product_urls)]
         products_info = []
         
         # Process tasks as they complete
-        for idx, future in enumerate(asyncio.as_completed(tasks)):
-            product_data = await future
+        for future in asyncio.as_completed(tasks):
+            idx, product_data = await future
             if product_data and product_data["title"]:
                 product_data["watchers"] = watchers_list[idx] if idx < len(watchers_list) else ""
                 products_info.append(product_data)
@@ -96,11 +119,23 @@ async def scrape_ebay(search_term):
 
 @app.route('/scrape', methods=['GET'])
 async def scrape_endpoint():
-    # Accept a query parameter "term" for search term (default: "shoes")
+    # Accept query parameter "term" (default: "shoes")
     search_term = request.args.get('term', 'shoes')
+    
+    # Load cache and check if term already exists
+    cache = load_cache()
+    if search_term in cache:
+        print("Loading from cache")
+        return jsonify(cache[search_term])
+    
+    # Otherwise, scrape and update the cache
     products_info = await scrape_ebay(search_term)
+    cache[search_term] = products_info
+    save_cache(cache)
     return jsonify(products_info)
 
 # Convert the Flask WSGI app to an ASGI app
 asgi_app = WsgiToAsgi(app)
 
+if __name__ == '__main__':
+    app.run(debug=True)
