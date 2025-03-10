@@ -73,25 +73,21 @@ async def scrape_ebay(search_term):
     search_url = f'https://www.ebay.com/sch/i.html?_nkw={search_term}'
     
     async with aiohttp.ClientSession() as session:
-        # Fetch and parse the search results page asynchronously
         search_html = await fetch(session, search_url, req_headers)
         search_soup = BeautifulSoup(search_html, "html.parser")
         
-        # Extract product links (skip the first link if necessary)
         link_elements = search_soup.find_all("a", class_="s-item__link")
         product_urls = [elem.get('href') for elem in link_elements[1:]]
         
-        # Extract watchers count directly from the search page
         watcher_elements = search_soup.find_all("span", class_="s-item__dynamic s-item__watchCountTotal")
         watchers_list = [span.text.strip() for span in watcher_elements]
         
-        # Create asynchronous tasks for fetching product pages concurrently
         tasks = [fetch_product_data(session, url, req_headers) for url in product_urls]
-        results = await asyncio.gather(*tasks)
-        
-        # Compile the product data with the corresponding watchers count
         products_info = []
-        for idx, product_data in enumerate(results):
+        
+        # Process tasks as they complete
+        for idx, future in enumerate(asyncio.as_completed(tasks)):
+            product_data = await future
             if product_data and product_data["title"]:
                 product_data["watchers"] = watchers_list[idx] if idx < len(watchers_list) else ""
                 products_info.append(product_data)
