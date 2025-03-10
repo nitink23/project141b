@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 import asyncio
 import aiohttp
 from bs4 import BeautifulSoup
+from asgiref.wsgi import WsgiToAsgi  # This converts a WSGI app to an ASGI app
 
 app = Flask(__name__)
 
@@ -104,5 +105,6 @@ async def scrape_endpoint():
     products_info = await scrape_ebay(search_term)
     return jsonify(products_info)
 
-if __name__ == '__main__':
-    app.run(debug=True)
+# Convert the Flask WSGI app to an ASGI app
+asgi_app = WsgiToAsgi(app)
+
