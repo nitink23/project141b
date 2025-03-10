@@ -1,16 +1,28 @@
 import asyncio
 import aiohttp
-from flask import Flask, request, jsonify
+import time
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from bs4 import BeautifulSoup
-from asgiref.wsgi import WsgiToAsgi  # Converts a WSGI app to an ASGI app
-from flask_caching import Cache
+from typing import Any
 
-app = Flask(__name__)
+app = FastAPI()
 
-# Configure Flask-Caching to use an in-memory cache (SimpleCache)
-app.config['CACHE_TYPE'] = 'SimpleCache'
-app.config['CACHE_DEFAULT_TIMEOUT'] = 300  # Cache timeout in seconds (5 minutes)
-cache = Cache(app)
+# Simple in-memory cache dictionary
+cache = {}
+CACHE_TIMEOUT = 300  # seconds
+
+def set_cache(key: str, data: Any):
+    cache[key] = {"data": data, "timestamp": time.time()}
+
+def get_cache(key: str):
+    entry = cache.get(key)
+    if entry:
+        if time.time() - entry["timestamp"] < CACHE_TIMEOUT:
+            return entry["data"]
+        else:
+            del cache[key]
+    return None
 
 # Functions to extract product details from a product page
 def get_title(soup):
@@ -71,14 +83,16 @@ async def fetch_product_data(session, url, req_headers):
     }
     return product_data
 
-# Helper to wrap tasks with index
+# Helper function to include the index with each fetch
 async def fetch_with_index(idx, url, req_headers, session):
     data = await fetch_product_data(session, url, req_headers)
     return idx, data
 
-async def scrape_ebay(search_term):
+async def scrape_ebay(search_term: str):
     req_headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                      'AppleWebKit/537.36 (KHTML, like Gecko) '
+                      'Chrome/123.0.0.0 Safari/537.36',
         'Accept-Language': 'en-US, en;q=0.5'
     }
     search_url = f'https://www.ebay.com/sch/i.html?_nkw={search_term}'
@@ -105,24 +119,19 @@ async def scrape_ebay(search_term):
                 
         return products_info
 
-@app.route('/scrape', methods=['GET'])
-async def scrape_endpoint():
-    # Accept query parameter "term" (default: "shoes")
-    search_term = request.args.get('term', 'shoes')
-    
-    # Try to retrieve cached data for this search term
-    cached_data = cache.get(search_term)
+@app.get("/scrape")
+async def scrape_endpoint(term: str = "shoes"):
+    # Check if the search term is in cache
+    cached_data = get_cache(term)
     if cached_data is not None:
         print("Loading from cache")
-        return jsonify(cached_data)
+        return JSONResponse(content=cached_data)
     
     # Otherwise, scrape and update the cache
-    products_info = await scrape_ebay(search_term)
-    cache.set(search_term, products_info)
-    return jsonify(products_info)
-
-# Convert the Flask WSGI app to an ASGI app
-asgi_app = WsgiToAsgi(app)
+    products_info = await scrape_ebay(term)
+    set_cache(term, products_info)
+    return JSONResponse(content=products_info)
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    import uvicorn
+    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
