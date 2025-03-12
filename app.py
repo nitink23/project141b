@@ -1,137 +1,155 @@
 import asyncio
 import aiohttp
-import time
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
 from bs4 import BeautifulSoup
-from typing import Any
 
 app = FastAPI()
 
-# Simple in-memory cache dictionary
-cache = {}
-CACHE_TIMEOUT = 300  # seconds
-
-def set_cache(key: str, data: Any):
-    cache[key] = {"data": data, "timestamp": time.time()}
-
-def get_cache(key: str):
-    entry = cache.get(key)
-    if entry:
-        if time.time() - entry["timestamp"] < CACHE_TIMEOUT:
-            return entry["data"]
-        else:
-            del cache[key]
-    return None
-
-# Functions to extract product details from a product page
-def get_title(soup):
+# Extraction functions for auction details (synchronous)
+def get_title(item):
     try:
-        title = soup.find('h1', class_='x-item-title__mainTitle')\
-                    .find('span', class_='ux-textspans ux-textspans--BOLD').text
+        title = item.find("div", class_="s-item__title").text.strip()
     except AttributeError:
         title = ""
     return title
 
-def get_price(soup):
+def get_price(item):
     try:
-        price = soup.find('div', class_='x-price-primary').text
+        price = item.find("span", class_="s-item__price").text.strip()
     except AttributeError:
         price = ""
     return price
 
-def get_availability(soup):
+def get_bid_count(item):
     try:
-        available = soup.find('div', class_='d-quantity__availability').text
+        bid_elem = item.select_one("span.s-item__bids.s-item__bidCount")
+        bid_count = bid_elem.text.strip() if bid_elem else ""
     except AttributeError:
-        available = ""
-    return available
+        bid_count = ""
+    return bid_count
 
-def get_rating(soup):
+def get_time_left(item):
     try:
-        rating = soup.find('div', class_='x-sellercard-atf__info')\
-                     .find('span', class_='ux-textspans ux-textspans--PSEUDOLINK').text
+        time_left = item.find("span", class_="s-item__time-left").text.strip()
     except AttributeError:
-        rating = "No rating"
-    return rating
+        time_left = ""
+    return time_left
 
-def get_review(soup):
+def get_best_offer(item):
     try:
-        review = soup.find('li', attrs={'data-testid': 'x-sellercard-atf__about-seller'})\
-                     .find('span', class_='ux-textspans ux-textspans--SECONDARY').text
+        bo_elem = item.select_one("div.s-item__dynamic.s-item__formatBestOfferEnabled a span")
+        best_offer = bo_elem.text.strip() if bo_elem else ""
     except AttributeError:
-        review = "No review"
-    return review
+        best_offer = ""
+    return best_offer
 
-async def fetch(session, url, headers):
+def get_delivery_cost(item):
+    try:
+        delivery_elem = item.select_one("span.s-item__shipping.s-item__logisticsCost")
+        delivery_cost = delivery_elem.text.strip() if delivery_elem else ""
+    except AttributeError:
+        delivery_cost = ""
+    return delivery_cost
+
+def get_authenticity(item):
+    try:
+        auth_elem = item.select_one("span.s-item__hotness.s-item__authorized-seller")
+        authenticity = auth_elem.text.strip() if auth_elem else ""
+    except AttributeError:
+        authenticity = ""
+    return authenticity
+
+def get_product_image(item):
+    try:
+        image_wrapper = item.find("div", class_="s-item__image-wrapper image-treatment")
+        if image_wrapper:
+            img = image_wrapper.find("img")
+            prod_img = img['src'].strip() if img and img.has_attr('src') else ""
+        else:
+            prod_img = ""
+    except AttributeError:
+        prod_img = ""
+    return prod_img
+
+def get_product_link(item):
+    try:
+        a_tag = item.find("a", href=True)
+        product_link = a_tag['href'].strip() if a_tag else ""
+    except AttributeError:
+        product_link = ""
+    return product_link
+
+def get_seller_info(item):
+    try:
+        seller_info = item.find("span", class_="s-item__seller-info-text").text.strip()
+    except AttributeError:
+        seller_info = ""
+    return seller_info
+
+# Asynchronous function to fetch a single page
+async def fetch_page(session: aiohttp.ClientSession, url: str, headers: dict) -> str:
     async with session.get(url, headers=headers) as response:
+        if response.status != 200:
+            raise HTTPException(status_code=response.status, detail=f"Error fetching {url}")
         return await response.text()
 
-async def fetch_product_data(session, url, req_headers):
-    try:
-        html = await fetch(session, url, req_headers)
-    except Exception as e:
-        print(f"Error fetching {url}: {e}")
-        return None
-    prod_soup = BeautifulSoup(html, "html.parser")
-    product_data = {
-        "title": get_title(prod_soup),
-        "price": get_price(prod_soup),
-        "availability": get_availability(prod_soup),
-        "rating": get_rating(prod_soup),
-        "review": get_review(prod_soup)
-    }
-    return product_data
-
-# Helper function to include the index with each fetch
-async def fetch_with_index(idx, url, req_headers, session):
-    data = await fetch_product_data(session, url, req_headers)
-    return idx, data
-
-async def scrape_ebay(search_term: str):
+@app.get("/auctions")
+async def get_auctions(search_term: str = "iphone", pages: int = 3):
+    """
+    Scrape eBay auctions for a given search term across a specified number of pages.
+    Default is 3 pages.
+    """
     req_headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
                       'AppleWebKit/537.36 (KHTML, like Gecko) '
                       'Chrome/123.0.0.0 Safari/537.36',
         'Accept-Language': 'en-US, en;q=0.5'
     }
-    search_url = f'https://www.ebay.com/sch/i.html?_nkw={search_term}'
     
+    tasks = []
+    # Create URLs for pages 1 to `pages`
+    for page in range(1, pages + 1):
+        search_url = f'https://www.ebay.com/sch/i.html?_nkw={search_term}&LH_Auction=1&_pgn={page}'
+        tasks.append(search_url)
+    
+    auctions = []
     async with aiohttp.ClientSession() as session:
-        search_html = await fetch(session, search_url, req_headers)
-        search_soup = BeautifulSoup(search_html, "html.parser")
+        # Fetch all pages concurrently
+        pages_content = await asyncio.gather(*[fetch_page(session, url, req_headers) for url in tasks])
         
-        link_elements = search_soup.find_all("a", class_="s-item__link")
-        product_urls = [elem.get('href') for elem in link_elements[1:]]
-        
-        watcher_elements = search_soup.find_all("span", class_="s-item__dynamic s-item__watchCountTotal")
-        watchers_list = [span.text.strip() for span in watcher_elements]
-        
-        tasks = [fetch_with_index(idx, url, req_headers, session) for idx, url in enumerate(product_urls)]
-        products_info = []
-        
-        # Process tasks as they complete
-        for future in asyncio.as_completed(tasks):
-            idx, product_data = await future
-            if product_data and product_data["title"]:
-                product_data["watchers"] = watchers_list[idx] if idx < len(watchers_list) else ""
-                products_info.append(product_data)
+        # Process each fetched page
+        for content in pages_content:
+            soup = BeautifulSoup(content, "html.parser")
+            items = soup.find_all("li", class_="s-item s-item__pl-on-bottom")
+            for item in items:
+                title = get_title(item)
+                if not title or title == "Shop on eBay":
+                    continue
+                price = get_price(item)
+                bid_count = get_bid_count(item)
+                time_left = get_time_left(item)
+                best_offer = get_best_offer(item)
+                delivery_cost = get_delivery_cost(item)
+                authenticity = get_authenticity(item)
+                prod_img = get_product_image(item)
+                product_link = get_product_link(item)
+                seller_info = get_seller_info(item)
                 
-        return products_info
+                auction_data = {
+                    "title": title,
+                    "price": price,
+                    "bid_count": bid_count,
+                    "time_left": time_left,
+                    "best_offer": best_offer,
+                    "delivery_cost": delivery_cost,
+                    "authenticity": authenticity,
+                    "prod_img": prod_img,
+                    "product_link": product_link,
+                    "seller_info": seller_info
+                }
+                auctions.append(auction_data)
+                
+    return auctions
 
-@app.get("/scrape")
-async def scrape_endpoint(term: str = "shoes"):
-    # Check if the search term is in cache
-    cached_data = get_cache(term)
-    if cached_data is not None:
-        print("Loading from cache")
-        return JSONResponse(content=cached_data)
-    
-    # Otherwise, scrape and update the cache
-    products_info = await scrape_ebay(term)
-    set_cache(term, products_info)
-    return JSONResponse(content=products_info)
-
-if __name__ == '__main__':
-    import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
+# To run the app, save this file (e.g., app.py) and run:
+# uvicorn app:app --reload
