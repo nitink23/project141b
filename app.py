@@ -156,11 +156,11 @@ class AuctionItem(BaseModel):
 @app.post("/product-data")
 async def get_product_data_endpoint(auction_list: List[AuctionItem]):
     """
-    Given a JSON array of auctions (each with a product_link),
+    Given a JSON array of auctions (each with at least a product_link, and optionally extra data),
     fetch product details concurrently.
     Expected input (JSON array):
     [
-      { "product_link": "https://..." },
+      { "product_link": "https://...", "title": "Some title", "price": "$100.00" },
       { "product_link": "https://..." }
     ]
     Returns JSON with detailed product data.
@@ -169,12 +169,15 @@ async def get_product_data_endpoint(auction_list: List[AuctionItem]):
     async with aiohttp.ClientSession() as session:
         for auction in auction_list:
             url = auction.product_link
+            posted_data = auction.dict()  # Includes extra keys (title, price, etc.)
             if url:
-                tasks.append(fetch_product_data(session, url, req_headers))
+                tasks.append(fetch_product_data(session, url, req_headers, posted_data))
         product_data = await asyncio.gather(*tasks)
     return JSONResponse(content=product_data)
 
-async def fetch_product_data(session: aiohttp.ClientSession, url: str, headers: dict) -> dict:
+
+
+async def fetch_product_data(session: aiohttp.ClientSession, url: str, headers: dict, posted_data: dict) -> dict:
     try:
         async with session.get(url, headers=headers, timeout=10) as response:
             if response.status != 200:
@@ -182,13 +185,14 @@ async def fetch_product_data(session: aiohttp.ClientSession, url: str, headers: 
             html = await response.text()
             soup = BeautifulSoup(html, "html.parser")
             return {
-                "title": get_title(soup),
-                "price": get_price(soup),
+                # Use posted title and product_link if available, else fall back to scraping
+                "title": posted_data.get("title") or get_title(soup),
+                "price": posted_data.get("price") or get_price(soup),
                 "images": get_images(soup),
                 "watchers": get_watchers(soup),
                 "condition": get_condition(soup),
                 "item_features": get_item_features(soup),
-                "product_link": url
+                "product_link": posted_data.get("product_link") or url
             }
     except Exception as e:
         return {"product_link": url, "error": str(e)}
