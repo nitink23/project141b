@@ -21,7 +21,7 @@ req_headers = {
 }
 
 # Precompiled regex pattern for seller info (for efficiency)
-SELLER_INFO_REGEX = re.compile(r'^(.*?)\s*\(([\d,]+)\)\s*([\d.]+%)$')
+SELLER_INFO_REGEX = r'^(.*?)\s*\(([\d,]+)\)\s*([\d.]+%)$'
 
 ##############################################
 # Helper Extraction Functions for Product Pages
@@ -167,18 +167,20 @@ def auction_get_product_link(item):
     except Exception:
         return ""
 
+
 def auction_get_seller_info(item):
     try:
-        return item.find("span", class_="s-item__seller-info-text").text.strip()
-    except Exception:
-        return ""
+        seller_info = item.find("span", class_="s-item__seller-info-text").text.strip()
+    except AttributeError:
+        seller_info = ""
+    return seller_info
 
 def parse_seller_info(seller_info):
     """
     Uses a precompiled regex for efficiency.
     Expected format: "seller_name (number) rating"
     """
-    match = SELLER_INFO_REGEX.search(seller_info)
+    match = re.search(SELLER_INFO_REGEX, seller_info)
     if match:
         seller_name = match.group(1).strip()
         seller_no_reviews = match.group(2).replace(',', '')
