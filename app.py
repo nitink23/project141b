@@ -4,7 +4,7 @@ import aiohttp
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from bs4 import BeautifulSoup
-from pydantic import BaseModel, RootModel
+from pydantic import BaseModel
 from typing import List, Dict
 
 app = FastAPI()
@@ -119,9 +119,6 @@ async def fetch_page(session: aiohttp.ClientSession, url: str, headers: dict) ->
 async def get_auctions(search_term: str = "iphone", pages: int = 3):
     """
     Search eBay auctions for a given search term across the specified number of pages.
-    Query parameters:
-      - search_term (default: "iphone")
-      - pages (default: 3)
     Returns JSON with a list of auction objects.
     """
     tasks = []
@@ -153,9 +150,29 @@ async def get_auctions(search_term: str = "iphone", pages: int = 3):
 class AuctionItem(BaseModel):
     product_link: str
 
-# Use pydantic's RootModel so that the input is a JSON array.
-class AuctionList(RootModel[List[AuctionItem]]):
-    pass
+    class Config:
+        extra = "ignore"  # Allow extra keys (like title, price) to be ignored.
+
+@app.post("/product-data")
+async def get_product_data_endpoint(auction_list: List[AuctionItem]):
+    """
+    Given a JSON array of auctions (each with a product_link),
+    fetch product details concurrently.
+    Expected input (JSON array):
+    [
+      { "product_link": "https://..." },
+      { "product_link": "https://..." }
+    ]
+    Returns JSON with detailed product data.
+    """
+    tasks = []
+    async with aiohttp.ClientSession() as session:
+        for auction in auction_list:
+            url = auction.product_link
+            if url:
+                tasks.append(fetch_product_data(session, url, req_headers))
+        product_data = await asyncio.gather(*tasks)
+    return JSONResponse(content=product_data)
 
 async def fetch_product_data(session: aiohttp.ClientSession, url: str, headers: dict) -> dict:
     try:
@@ -176,26 +193,6 @@ async def fetch_product_data(session: aiohttp.ClientSession, url: str, headers: 
     except Exception as e:
         return {"product_link": url, "error": str(e)}
 
-@app.post("/product-data")
-async def get_product_data_endpoint(auction_list: AuctionList):
-    """
-    Given a JSON array of auctions (each with a product_link), fetch product details concurrently.
-    Expected input (JSON array):
-    [
-      { "product_link": "https://..." },
-      { "product_link": "https://..." }
-    ]
-    Returns JSON with detailed product data.
-    """
-    tasks = []
-    async with aiohttp.ClientSession() as session:
-        for auction in auction_list.__root__:
-            url = auction.product_link
-            if url:
-                tasks.append(fetch_product_data(session, url, req_headers))
-        product_data = await asyncio.gather(*tasks)
-    return JSONResponse(content=product_data)
-
 ##############################################
 # Single Product Endpoint (GET /single-product)
 ##############################################
@@ -203,7 +200,6 @@ async def get_product_data_endpoint(auction_list: AuctionList):
 async def single_product(product_link: str):
     """
     Given a product_link as a query parameter, scrape its details.
-    Example: /single-product?product_link=https://www.ebay.com/itm/...
     Uses caching to speed up repeated requests.
     Returns JSON with the product data.
     """
