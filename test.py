@@ -6,7 +6,7 @@ BASE_URL = "https://project141b.onrender.com"
 def test_auctions():
     print("Testing GET /auctions...")
     url = f"{BASE_URL}/auctions"
-    params = {"search_term": "shoes", "pages": 1}  # You can adjust search_term and pages as needed.
+    params = {"search_term": "shoes", "pages": 3}  # You can adjust search_term and pages as needed.
     start_time = time.time()
     try:
         response = requests.get(url, params=params, timeout=30)
