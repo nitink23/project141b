@@ -1,16 +1,25 @@
 import re
 import asyncio
 import aiohttp
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 from bs4 import BeautifulSoup
 from pydantic import BaseModel
 from typing import List, Dict
+import time
+import hashlib
+import json
 
 app = FastAPI()
 
-# Global cache for single product data (in-memory)
+# Global caches with timestamps
+# Format: {key: {"data": result_dict, "timestamp": time_added}}
 product_cache: Dict[str, dict] = {}
+auction_cache: Dict[str, dict] = {}
+product_data_cache: Dict[str, dict] = {}
+
+# Cache expiry time in seconds (10 minutes)
+CACHE_EXPIRY_TIME = 600
 
 # Request headers for all requests
 req_headers = {
@@ -204,8 +213,17 @@ async def fetch_page(session: aiohttp.ClientSession, url: str, headers: dict) ->
 async def get_auctions(search_term: str = "iphone", pages: int = 3):
     """
     Asynchronously search eBay auctions for a given search term across the specified number of pages.
-    Returns detailed auction data concurrently.
+    Returns detailed auction data concurrently. Uses caching to speed up repeated requests.
     """
+    # Create cache key based on search parameters
+    cache_key = f"{search_term}_{pages}"
+    
+    # Check cache first
+    cached_data = get_from_cache(auction_cache, cache_key)
+    if cached_data:
+        return JSONResponse(content=cached_data)
+    
+    # Fetch data if not in cache or expired
     tasks = []
     async with aiohttp.ClientSession() as session:
         for page in range(1, pages + 1):
@@ -248,6 +266,9 @@ async def get_auctions(search_term: str = "iphone", pages: int = 3):
                 "seller_no_reviews": seller_no_reviews,
                 "seller_rating": seller_rating
             })
+    
+    # Store in cache
+    store_in_cache(auction_cache, cache_key, auctions)
     return JSONResponse(content=auctions)
 
 ##############################################
@@ -280,16 +301,57 @@ async def fetch_product_data(session: aiohttp.ClientSession, url: str, headers: 
 async def get_product_data_endpoint(auction_list: List[AuctionItem]):
     """
     Given a JSON array of auctions (each with a product_link),
-    fetch product details concurrently.
+    fetch product details concurrently. Uses caching where possible.
     """
+    # Create a cache key based on sorted list of URLs
+    urls = sorted([auction.product_link for auction in auction_list if auction.product_link])
+    cache_key = hashlib.md5(json.dumps(urls).encode()).hexdigest()
+    
+    # Check if we have this exact collection cached
+    cached_data = get_from_cache(product_data_cache, cache_key)
+    if cached_data:
+        return JSONResponse(content=cached_data)
+    
+    # If not found in cache, fetch each URL (checking individual URL cache)
+    product_data = []
     tasks = []
-    async with aiohttp.ClientSession() as session:
-        for auction in auction_list:
-            url = auction.product_link
-            if url:
+    to_fetch = []
+    url_to_index = {}
+    
+    # First check individual URLs in product_cache
+    for i, auction in enumerate(auction_list):
+        url = auction.product_link
+        if not url:
+            continue
+        
+        # Check if this URL is already in the single product cache
+        cached_product = get_from_cache(product_cache, url)
+        if cached_product:
+            product_data.append(cached_product)
+        else:
+            # Save the URL to fetch and its position
+            to_fetch.append(url)
+            url_to_index[url] = i
+    
+    # Fetch URLs not in cache
+    if to_fetch:
+        async with aiohttp.ClientSession() as session:
+            for url in to_fetch:
                 tasks.append(fetch_product_data(session, url, req_headers))
-        product_data = await asyncio.gather(*tasks)
-    return JSONResponse(content=product_data)
+            
+            new_data = await asyncio.gather(*tasks)
+            
+            # Cache individual results
+            for url, result in zip(to_fetch, new_data):
+                store_in_cache(product_cache, url, result)
+                product_data.append(result)
+    
+    # Sort the results to match original order
+    sorted_data = sorted(product_data, key=lambda x: urls.index(x["product_link"]))
+    
+    # Store the entire collection in cache
+    store_in_cache(product_data_cache, cache_key, sorted_data)
+    return JSONResponse(content=sorted_data)
 
 ##############################################
 # Single Product Endpoint (GET /single-product)
@@ -298,12 +360,52 @@ async def get_product_data_endpoint(auction_list: List[AuctionItem]):
 async def single_product(product_link: str):
     """
     Given a product_link, asynchronously scrape its details.
-    Uses caching to speed up repeated requests.
+    Uses caching to speed up repeated requests (cache expires after 10 minutes).
     """
-    if product_link in product_cache:
-        return JSONResponse(content=product_cache[product_link])
+    # Check cache
+    cached_data = get_from_cache(product_cache, product_link)
+    if cached_data:
+        return JSONResponse(content=cached_data)
     
+    # Fetch new data if not in cache or expired
     async with aiohttp.ClientSession() as session:
         result = await fetch_product_data(session, product_link, req_headers)
-        product_cache[product_link] = result
+        # Store result with timestamp
+        store_in_cache(product_cache, product_link, result)
         return JSONResponse(content=result)
+
+# Function to clean expired cache entries for all caches
+async def clean_expired_cache():
+    while True:
+        current_time = time.time()
+        
+        # Clean each cache
+        for cache in [product_cache, auction_cache, product_data_cache]:
+            expired_keys = [
+                key for key, value in cache.items() 
+                if current_time - value["timestamp"] > CACHE_EXPIRY_TIME
+            ]
+            for key in expired_keys:
+                cache.pop(key, None)
+            
+        # Check every minute
+        await asyncio.sleep(60)
+
+# Start the cache cleaning task when app starts
+@app.on_event("startup")
+async def start_cache_cleaner():
+    asyncio.create_task(clean_expired_cache())
+
+# Helper function to check if cache entry is valid
+def get_from_cache(cache, key):
+    if key in cache:
+        if time.time() - cache[key]["timestamp"] <= CACHE_EXPIRY_TIME:
+            return cache[key]["data"]
+    return None
+
+# Helper function to store in cache
+def store_in_cache(cache, key, data):
+    cache[key] = {
+        "data": data,
+        "timestamp": time.time()
+    }
