@@ -2,6 +2,7 @@ import re
 import asyncio
 import aiohttp
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from bs4 import BeautifulSoup
 from pydantic import BaseModel
 from typing import List, Dict
@@ -99,7 +100,7 @@ def get_item_features(soup):
     return features
 
 ##############################################
-# Auction Search Endpoint (/auctions)
+# Auction Search Endpoint (GET /auctions)
 ##############################################
 def get_product_link(item):
     try:
@@ -108,7 +109,6 @@ def get_product_link(item):
     except Exception:
         return ""
 
-# Asynchronous function to fetch a page (used by GET /auctions)
 async def fetch_page(session: aiohttp.ClientSession, url: str, headers: dict) -> str:
     async with session.get(url, headers=headers, timeout=10) as response:
         if response.status != 200:
@@ -117,17 +117,11 @@ async def fetch_page(session: aiohttp.ClientSession, url: str, headers: dict) ->
 
 @app.get("/auctions")
 async def get_auctions(search_term: str = "iphone", pages: int = 3):
-    """
-    Scrape eBay auctions for a given search term across the specified number of pages.
-    """
     tasks = []
     async with aiohttp.ClientSession() as session:
-        # Build search URLs for each page using a single session.
         for page in range(1, pages + 1):
             search_url = f'https://www.ebay.com/sch/i.html?_nkw={search_term}&LH_Auction=1&_pgn={page}'
             tasks.append(fetch_page(session, search_url, req_headers))
-        
-        # Fetch pages concurrently.
         pages_content = await asyncio.gather(*tasks)
     
     auctions = []
@@ -136,7 +130,6 @@ async def get_auctions(search_term: str = "iphone", pages: int = 3):
         items = soup.find_all("li", class_="s-item s-item__pl-on-bottom")
         for item in items:
             title_tag = item.find("div", class_="s-item__title")
-            # Skip placeholder items.
             if not title_tag or title_tag.text.strip() == "Shop on eBay":
                 continue
             auction_data = {
@@ -145,18 +138,18 @@ async def get_auctions(search_term: str = "iphone", pages: int = 3):
                 "product_link": get_product_link(item)
             }
             auctions.append(auction_data)
-    return auctions
+    return JSONResponse(content=auctions)
 
 ##############################################
-# Product Data Endpoint for a List of Auctions (/product-data)
+# Product Data Endpoint for a List of Auctions (POST /product-data)
 ##############################################
 class AuctionItem(BaseModel):
     product_link: str
 
+# Use a custom root type so the input is a JSON array.
 class AuctionList(BaseModel):
-    auctions: List[AuctionItem]
+    __root__: List[AuctionItem]
 
-# Asynchronous function to fetch and extract product data for a single link.
 async def fetch_product_data(session: aiohttp.ClientSession, url: str, headers: dict) -> dict:
     try:
         async with session.get(url, headers=headers, timeout=10) as response:
@@ -177,39 +170,29 @@ async def fetch_product_data(session: aiohttp.ClientSession, url: str, headers: 
         return {"product_link": url, "error": str(e)}
 
 @app.post("/product-data")
-async def get_product_data(auction_list: AuctionList):
-    """
-    Given a list of auctions (each with a product_link), fetch product details concurrently.
-    """
+async def get_product_data_endpoint(auction_list: AuctionList):
+    # auction_list.__root__ is a list of AuctionItem.
     tasks = []
     async with aiohttp.ClientSession() as session:
-        for auction in auction_list.auctions:
+        for auction in auction_list.__root__:
             url = auction.product_link
             if url:
                 tasks.append(fetch_product_data(session, url, req_headers))
         product_data = await asyncio.gather(*tasks)
-    return product_data
+    return JSONResponse(content=product_data)
 
 ##############################################
-# Single Product Endpoint (/single-product)
+# Single Product Endpoint (GET /single-product)
 ##############################################
-class SingleProductRequest(BaseModel):
-    product_link: str
-
-@app.post("/single-product")
-async def single_product(data: SingleProductRequest):
-    """
-    Given a product_link, scrape its details. 
-    The result is cached to speed up repeated requests.
-    """
-    product_link = data.product_link
+@app.get("/single-product")
+async def single_product(product_link: str):
     if product_link in product_cache:
-        return product_cache[product_link]
+        return JSONResponse(content=product_cache[product_link])
     
     async with aiohttp.ClientSession() as session:
         result = await fetch_product_data(session, product_link, req_headers)
-        product_cache[product_link] = result  # Cache the result
-        return result
+        product_cache[product_link] = result
+        return JSONResponse(content=result)
 
 # To run the app, save this file (e.g., app.py) and run:
 # uvicorn app:app --reload
