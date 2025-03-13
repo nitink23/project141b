@@ -166,8 +166,6 @@ async def fetch_product_data(session: aiohttp.ClientSession, url: str, headers: 
             html = await response.text()
             soup = BeautifulSoup(html, "html.parser")
             return {
-                "title": get_title(soup),
-                "price": get_price(soup),
                 "images": get_images(soup),
                 "watchers": get_watchers(soup),
                 "condition": get_condition(soup),
